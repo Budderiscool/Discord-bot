@@ -62,7 +62,19 @@ async function sendDM(user, reason, duration) {
 const commands = [
   new SlashCommandBuilder().setName('ping').setDescription('Replies with bot latency'),
   new SlashCommandBuilder().setName('server').setDescription('Replies with server info'),
-  new SlashCommandBuilder().setName('user').setDescription('Replies with your user info')
+  new SlashCommandBuilder().setName('user').setDescription('Replies with your user info'),
+  new SlashCommandBuilder()
+    .setName('modlink')
+    .setDescription('Get a mod link (Modrinth or CurseForge)')
+    .addStringOption(option => option
+      .setName('site')
+      .setDescription('Site to get the mod link from')
+      .setRequired(false)
+      .addChoices(
+        { name: 'modrinth', value: 'modrinth' },
+        { name: 'curseforge', value: 'curseforge' }
+      )
+    )
 ].map(cmd => cmd.toJSON());
 
 client.once('ready', async () => {
@@ -89,6 +101,13 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply(`Server name: ${interaction.guild.name}\nTotal members: ${interaction.guild.memberCount}`);
   } else if (interaction.commandName === 'user') {
     await interaction.reply(`Your tag: ${interaction.user.tag}\nYour ID: ${interaction.user.id}`);
+  } else if (interaction.commandName === 'modlink') {
+    const site = interaction.options.getString('site') || 'modrinth';
+    if (site === 'curseforge') {
+      await interaction.reply('Here is the CurseForge mod link: curseforge');
+    } else {
+      await interaction.reply('Here is the Modrinth mod link: https://modrinth.com/project/qWl7Ylv2');
+    }
   }
 });
 
