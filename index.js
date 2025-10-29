@@ -3,18 +3,18 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// Bot with guilds intent (slash commands don’t need messageContent)
+// Create bot with guilds intent only (slash commands don’t need messageContent)
 const bot = new Eris(process.env.TOKEN, {
   intents: ["guilds"]
 });
 
-// Register commands when ready
+// Your server ID
+const guildID = "1417014862273445900";
+
+// Register slash commands when bot is ready
 bot.on("ready", async () => {
   console.log(`✅ Logged in as ${bot.user.username}`);
 
-  const guildID = "1417014862273445900"; // Replace with your server ID
-
-  // Register slash commands in your server
   await bot.bulkEditGuildCommands(guildID, [
     {
       name: "ping",
@@ -37,36 +37,37 @@ bot.on("ready", async () => {
       ]
     }
   ]);
+
+  console.log("✅ Slash commands registered");
 });
 
-// Handle interactions
+// Handle slash commands
 bot.on("interactionCreate", async (interaction) => {
   if (!interaction.isCommand) return;
 
   const { name, data } = interaction;
 
   if (name === "ping") {
-    await bot.createMessage(interaction.channel.id, "🏓 Pong!");
-  }
+    await interaction.createMessage("🏓 Pong!");
+  } 
 
   else if (name === "server") {
     const guild = interaction.guild;
-    await bot.createMessage(
-      interaction.channel.id,
+    await interaction.createMessage(
       `Server: **${guild.name}**\nMembers: **${guild.memberCount}**`
     );
-  }
+  } 
 
   else if (name === "userinfo") {
     const member = data.options?.[0]?.value
       ? await bot.getRESTUser(data.options[0].value)
       : interaction.member.user;
 
-    await bot.createMessage(
-      interaction.channel.id,
+    await interaction.createMessage(
       `User: **${member.username}#${member.discriminator}**\nID: **${member.id}**`
     );
   }
 });
 
+// Connect the bot
 bot.connect();
