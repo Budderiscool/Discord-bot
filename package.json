@@ -1,0 +1,12 @@
+{
+  "name": "tiny-eris-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "eris": "^0.18.1",
+    "dotenv": "^16.0.0"
+  }
+}
