@@ -12,7 +12,7 @@ const bot = new Eris(process.env.TOKEN, {
 bot.on("ready", async () => {
   console.log(`✅ Logged in as ${bot.user.username}`);
 
-  const guildID = "YOUR_GUILD_ID"; // Replace with your server ID
+  const guildID = "1417014862273445900"; // Replace with your server ID
 
   // Register slash commands in your server
   await bot.bulkEditGuildCommands(guildID, [
