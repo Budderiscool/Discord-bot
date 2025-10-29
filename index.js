@@ -3,7 +3,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const bot = new Eris.Client(process.env.TOKEN);
+const { Client } = Eris;
+const bot = new Client(process.env.TOKEN);
 
 bot.on("ready", () => {
   console.log(`✅ Logged in as ${bot.user.username}`);
