@@ -1,29 +1,9 @@
 const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const fetch = require('node-fetch');
-const fs = require('fs');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const CLIENT_ID = process.env.CLIENT_ID; // Your bot's application/client ID
-const PROJECT_ID = 'qWl7Ylv2'; // Modrinth project ID
-
-const CONFIG_FILE = './config.json'; // Channel config file
-
-// Load or initialize config
-let config = { update_channel: null };
-if (fs.existsSync(CONFIG_FILE)) {
-  try {
-    config = JSON.parse(fs.readFileSync(CONFIG_FILE));
-  } catch (e) {
-    console.warn('Could not read config file, using defaults.');
-  }
-}
-
-// Save config helper
-function saveConfig() {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-}
 
 const client = new Client({
   intents: [
@@ -45,38 +25,6 @@ const MUTE_MULTIPLIER = 2;
 const userSpamMap = new Map();
 const userMuteStrikes = new Map();
 
-// Modrinth update checker state
-let lastVersionId = null;
-async function checkModUpdate() {
-  try {
-    const resp = await fetch(`https://api.modrinth.com/v2/project/${PROJECT_ID}/version`);
-    if (!resp.ok) {
-      console.error('Failed to fetch Modrinth versions');
-      return;
-    }
-    const versions = await resp.json();
-    if (versions.length === 0) return;
-    const latest = versions[0];
-    if (lastVersionId !== latest.id) {
-      lastVersionId = latest.id;
-      if (config.update_channel) {
-        const channel = await client.channels.fetch(config.update_channel).catch(() => null);
-        if (channel) {
-          await channel.send(`Mod updated! Latest version: ${latest.name} (${latest.version_number})\n${latest.changelog}\nDownload: ${latest.files[0].url}`);
-        } else {
-          console.log('Configured update channel not found.');
-        }
-      }
-    }
-  } catch (err) {
-    console.error('Error checking Modrinth updates:', err);
-  }
-}
-
-// Check every 10 minutes
-setInterval(checkModUpdate, 10 * 60 * 1000);
-
-// AI moderation
 async function isMessageBad(messageContent) {
   const model = genAI.getGenerativeModel({ model: "gemini-pro" });
   const prompt = `Is this Discord message inappropriate, toxic, offensive, or spam? Reply "yes" for delete, "no" for keep:\n\n"${messageContent}"`;
@@ -126,16 +74,6 @@ const commands = [
         { name: 'modrinth', value: 'modrinth' },
         { name: 'curseforge', value: 'curseforge' }
       )
-    ),
-  // Settings command to set the update channel
-  new SlashCommandBuilder()
-    .setName('settings')
-    .setDescription('Configure bot settings')
-    .addChannelOption(option =>
-      option
-        .setName('update_channel')
-        .setDescription('Set the channel for mod update notifications')
-        .setRequired(true)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -152,8 +90,6 @@ client.once('ready', async () => {
   } catch (err) {
     console.error('Error registering slash commands:', err);
   }
-  // Initial check on startup
-  checkModUpdate();
 });
 
 // Handle slash commands
@@ -172,16 +108,6 @@ client.on('interactionCreate', async (interaction) => {
     } else {
       await interaction.reply('Here is the Modrinth mod link: https://modrinth.com/project/qWl7Ylv2');
     }
-  } else if (interaction.commandName === 'settings') {
-    // Only allow admins to set this
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      await interaction.reply({ content: "You must be an administrator to use this command.", ephemeral: true });
-      return;
-    }
-    const channel = interaction.options.getChannel('update_channel');
-    config.update_channel = channel.id;
-    saveConfig();
-    await interaction.reply(`Update notifications will be sent to ${channel}.`);
   }
 });
 
