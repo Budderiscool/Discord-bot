@@ -1,73 +1,54 @@
-import Eris from "eris";
-import dotenv from "dotenv";
+const { Client, GatewayIntentBits } = require('discord.js');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-dotenv.config();
+// Railway provides secrets as environment variables!
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Create bot with guilds intent only (slash commands don’t need messageContent)
-const bot = new Eris(process.env.TOKEN, {
-  intents: ["guilds"]
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// Your server ID
-const guildID = "1417014862273445900";
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// Register slash commands when bot is ready
-bot.on("ready", async () => {
-  console.log(`✅ Logged in as ${bot.user.username}`);
+async function isMessageBad(messageContent) {
+  const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+  const prompt = `Is this Discord message inappropriate, toxic, offensive, or spam? Reply "yes" for delete, "no" for keep:\n\n"${messageContent}"`;
 
-  await bot.bulkEditGuildCommands(guildID, [
-    {
-      name: "ping",
-      description: "Replies with Pong!"
-    },
-    {
-      name: "server",
-      description: "Shows server info"
-    },
-    {
-      name: "userinfo",
-      description: "Shows info about a user",
-      options: [
-        {
-          type: 6, // USER type
-          name: "target",
-          description: "Select a user",
-          required: false
-        }
-      ]
+  try {
+    const result = await model.generateContent(prompt);
+    const answer = result.response.text().trim().toLowerCase();
+    return answer.startsWith("yes");
+  } catch (err) {
+    console.error("Gemini API error:", err);
+    return false; // If API fails, don't delete
+  }
+}
+
+client.on('messageCreate', async (message) => {
+  // Ignore bots and system messages
+  if (message.author.bot) return;
+
+  try {
+    const shouldDelete = await isMessageBad(message.content);
+    if (shouldDelete) {
+      await message.delete();
+      await message.channel.send({
+        content: `Message from <@${message.author.id}> was deleted for violating server guidelines.`
+        // Remove 'ephemeral' property, as it's not supported for normal messages
+      });
     }
-  ]);
-
-  console.log("✅ Slash commands registered");
-});
-
-// Handle slash commands
-bot.on("interactionCreate", async (interaction) => {
-  if (!interaction.isCommand) return;
-
-  const { name, data } = interaction;
-
-  if (name === "ping") {
-    await interaction.createMessage("🏓 Pong!");
-  } 
-
-  else if (name === "server") {
-    const guild = interaction.guild;
-    await interaction.createMessage(
-      `Server: **${guild.name}**\nMembers: **${guild.memberCount}**`
-    );
-  } 
-
-  else if (name === "userinfo") {
-    const member = data.options?.[0]?.value
-      ? await bot.getRESTUser(data.options[0].value)
-      : interaction.member.user;
-
-    await interaction.createMessage(
-      `User: **${member.username}#${member.discriminator}**\nID: **${member.id}**`
-    );
+  } catch (err) {
+    console.error("Error moderating message:", err);
   }
 });
 
-// Connect the bot
-bot.connect();
+client.once('ready', () => {
+  console.log(`Logged in as ${client.user.tag}!`);
+});
+
+client.login(DISCORD_TOKEN);
