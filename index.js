@@ -1,8 +1,9 @@
-const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const CLIENT_ID = process.env.CLIENT_ID; // Your bot's application/client ID
 
 const client = new Client({
   intents: [
@@ -16,14 +17,13 @@ const client = new Client({
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // Spam detection config
-const SPAM_INTERVAL_MS = 10 * 1000; // 10 seconds
-const SPAM_MESSAGE_COUNT = 5;       // More than 5 messages in interval = spam
-const BASE_MUTE_MINUTES = 5;        // Initial mute duration
-const MUTE_MULTIPLIER = 2;          // Each repeat multiplies mute time
+const SPAM_INTERVAL_MS = 10 * 1000;
+const SPAM_MESSAGE_COUNT = 5;
+const BASE_MUTE_MINUTES = 5;
+const MUTE_MULTIPLIER = 2;
 
-// In-memory spam tracking
-const userSpamMap = new Map(); // userId -> [timestamps]
-const userMuteStrikes = new Map(); // userId -> strikes
+const userSpamMap = new Map();
+const userMuteStrikes = new Map();
 
 async function isMessageBad(messageContent) {
   const model = genAI.getGenerativeModel({ model: "gemini-pro" });
@@ -39,10 +39,8 @@ async function isMessageBad(messageContent) {
 }
 
 async function muteUser(member, strikes) {
-  // Calculate mute duration
   let minutes = BASE_MUTE_MINUTES * Math.pow(MUTE_MULTIPLIER, strikes - 1);
   let ms = minutes * 60 * 1000;
-
   try {
     await member.timeout(ms, `Muted for spam (strike ${strikes})`);
     return minutes;
@@ -59,6 +57,40 @@ async function sendDM(user, reason, duration) {
     console.error(`Could not DM user ${user.id}:`, err);
   }
 }
+
+// SLASH COMMANDS
+const commands = [
+  new SlashCommandBuilder().setName('ping').setDescription('Replies with bot latency'),
+  new SlashCommandBuilder().setName('server').setDescription('Replies with server info'),
+  new SlashCommandBuilder().setName('user').setDescription('Replies with your user info')
+].map(cmd => cmd.toJSON());
+
+client.once('ready', async () => {
+  console.log(`Logged in as ${client.user.tag}!`);
+  // Register slash commands globally
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  try {
+    await rest.put(
+      Routes.applicationCommands(CLIENT_ID),
+      { body: commands }
+    );
+    console.log('Slash commands registered!');
+  } catch (err) {
+    console.error('Error registering slash commands:', err);
+  }
+});
+
+// Handle slash commands
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === 'ping') {
+    await interaction.reply(`🏓 Pong! Latency is ${client.ws.ping}ms.`);
+  } else if (interaction.commandName === 'server') {
+    await interaction.reply(`Server name: ${interaction.guild.name}\nTotal members: ${interaction.guild.memberCount}`);
+  } else if (interaction.commandName === 'user') {
+    await interaction.reply(`Your tag: ${interaction.user.tag}\nYour ID: ${interaction.user.id}`);
+  }
+});
 
 client.on('messageCreate', async (message) => {
   // Ignore bots
@@ -83,30 +115,22 @@ client.on('messageCreate', async (message) => {
   const now = Date.now();
   const userId = message.author.id;
   let timestamps = userSpamMap.get(userId) || [];
-  // Remove old timestamps
   timestamps = timestamps.filter(ts => now - ts < SPAM_INTERVAL_MS);
   timestamps.push(now);
   userSpamMap.set(userId, timestamps);
 
   if (timestamps.length > SPAM_MESSAGE_COUNT) {
-    // Mute logic
     const member = await message.guild.members.fetch(userId);
     let strikes = (userMuteStrikes.get(userId) || 0) + 1;
     userMuteStrikes.set(userId, strikes);
 
-    // Mute and DM
     const duration = await muteUser(member, strikes);
     if (duration !== null) {
       await sendDM(message.author, "Spamming messages", duration);
       await message.channel.send(`<@${userId}> was muted for spamming (${duration} minutes, strike ${strikes}).`);
     }
-    // Clear spam timestamps to avoid repeated mutes instantly
     userSpamMap.set(userId, []);
   }
-});
-
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}!`);
 });
 
 client.login(DISCORD_TOKEN);
