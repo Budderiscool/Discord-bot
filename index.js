@@ -125,6 +125,14 @@ async function checkForModUpdates(channel = null) {
   const versions = await fetchModrinthVersions();
   if (!versions || !versions.length) return;
 
+  // Fetch project info for creator & image
+  const projectRes = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
+  const projectData = await projectRes.json().catch(() => ({}));
+
+  const projectName = projectData.title || "Modrinth Project";
+  const projectAuthor = (projectData.author && projectData.author.username) || "Unknown Creator";
+  const projectIcon = (projectData.icon_url) || null;
+
   if (!channel) {
     channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
     if (!channel) return;
@@ -133,16 +141,23 @@ async function checkForModUpdates(channel = null) {
   for (const version of versions) {
     if (postedVersions.has(version.id)) continue;
 
-    const name = version.name || version.version_number;
-    const changelog = version.changelog || "No changelog provided";
+    const versionName = version.name || version.version_number;
     const versionType = version.version_type;
+    const changelog = version.changelog || "No changelog provided";
     const url = `https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`;
-
+    
     const embed = {
-      color: 0x00ff00,
-      title: `New ${versionType} version: ${name}`,
-      description: changelog.length > 1024 ? changelog.substring(0, 1021) + "..." : changelog,
+      color: 0x00ff00, // Green
+      title: `${projectName} - New ${versionType} Version!`,
       url: url,
+      description: changelog.length > 1024 ? changelog.substring(0, 1021) + "..." : changelog,
+      thumbnail: projectIcon ? { url: projectIcon } : undefined,
+      fields: [
+        { name: "Version", value: versionName, inline: true },
+        { name: "Author", value: projectAuthor, inline: true },
+        { name: "Version Type", value: versionType, inline: true },
+        { name: "Downloads", value: version.files.map(f => `[${f.filename}](${f.url})`).join("\n") || "No files" }
+      ],
       timestamp: new Date(version.date_published).toISOString(),
       footer: { text: "Modrinth Updates" }
     };
