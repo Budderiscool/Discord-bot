@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fs = require('fs');
 const path = require('path');
@@ -10,8 +10,11 @@ const CLIENT_ID = process.env.CLIENT_ID;
 // Modrinth settings
 const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
 const UPDATE_CHANNEL_ID = '1431127498904703078';
-const POLL_INTERVAL_MS = 10 * 60 * 1000;
+const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const DATA_FILE = path.join(__dirname, 'posted_versions.json');
+
+// How many latest versions /modrinthtest should send
+const TEST_LATEST_COUNT = 5;
 
 const client = new Client({
   intents: [
@@ -85,7 +88,7 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName('modrinthtest')
-    .setDescription('Test command to send all current Modrinth updates')
+    .setDescription('Test command to send the newest Modrinth updates (bypasses stored JSON)')
 ].map(cmd => cmd.toJSON());
 
 // ---------------- Modrinth updater ----------------
@@ -121,84 +124,118 @@ async function fetchModrinthVersions() {
   }
 }
 
-async function checkForModUpdates(channel = null) {
+async function fetchModrinthProject() {
+  try {
+    const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error("Failed to fetch Modrinth project:", err);
+    return {};
+  }
+}
+
+/**
+ * checkForModUpdates
+ * @param {Object|null} channel - discord.js channel object to post into (if null, uses UPDATE_CHANNEL_ID)
+ * @param {boolean} ignorePosted - if true, bypass postedVersions checks and DO NOT save posted IDs (used by test)
+ * @param {number|null} limit - if provided, only send up to `limit` versions (latest first)
+ */
+async function checkForModUpdates(channel = null, ignorePosted = false, limit = null) {
   const versions = await fetchModrinthVersions();
   if (!versions || !versions.length) return;
 
-  // Fetch project info for creator & image
-  const projectRes = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
-  const projectData = await projectRes.json().catch(() => ({}));
+  // sort newest-first by date_published
+  versions.sort((a, b) => new Date(b.date_published) - new Date(a.date_published));
 
+  const projectData = await fetchModrinthProject();
   const projectName = projectData.title || "Modrinth Project";
-  const projectAuthor = (projectData.author && projectData.author.username) || "Unknown Creator";
-  const projectIcon = (projectData.icon_url) || null;
+  const projectAuthor = projectData.author?.username || "Unknown Creator";
+  const projectIcon = projectData.icon_url || null;
+  const projectBanner = projectData.gallery?.[0] || null; // attempt to use first gallery image as big image
 
   if (!channel) {
     channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
     if (!channel) return;
   }
 
-  for (const version of versions) {
-    if (postedVersions.has(version.id)) continue;
+  // apply limit if provided
+  const toSend = limit ? versions.slice(0, limit) : versions;
 
-    const versionName = version.name || version.version_number;
-    const versionType = version.version_type;
+  for (const version of toSend) {
+    if (!ignorePosted && postedVersions.has(version.id)) continue;
+
+    const versionName = version.name || version.version_number || "Unnamed";
+    const versionType = version.version_type || "Unknown";
     const changelog = version.changelog || "No changelog provided";
     const url = `https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`;
-    
+
+    // compose downloads list safely (limit text so embed stays under limits)
+    const downloads = (version.files || [])
+      .map(f => f.filename ? `[${f.filename}](${f.url})` : (f.url || 'No URL'))
+      .join('\n') || "No files";
+
     const embed = {
-      color: 0x00ff00, // Green
-      title: `${projectName} - New ${versionType} Version!`,
+      color: 0x00ff00,
+      title: `${projectName} — ${versionName}`,
       url: url,
       description: changelog.length > 1024 ? changelog.substring(0, 1021) + "..." : changelog,
       thumbnail: projectIcon ? { url: projectIcon } : undefined,
+      image: projectBanner ? { url: projectBanner } : undefined,
       fields: [
         { name: "Version", value: versionName, inline: true },
         { name: "Author", value: projectAuthor, inline: true },
-        { name: "Version Type", value: versionType, inline: true },
-        { name: "Downloads", value: version.files.map(f => `[${f.filename}](${f.url})`).join("\n") || "No files" }
+        { name: "Type", value: versionType, inline: true },
+        { name: "Downloads", value: downloads.length > 1024 ? "Too many files to list." : downloads }
       ],
       timestamp: new Date(version.date_published).toISOString(),
       footer: { text: "Modrinth Updates" }
     };
 
-    await channel.send({ embeds: [embed] });
-    postedVersions.add(version.id);
-    savePostedVersions();
+    try {
+      await channel.send({ embeds: [embed] });
+      // Only mark as posted if NOT in test/bypass mode
+      if (!ignorePosted) {
+        postedVersions.add(version.id);
+        savePostedVersions();
+      }
+    } catch (err) {
+      console.error("Failed to send Modrinth embed:", err);
+    }
   }
 }
 
-// ---------------- Bot events ----------------
+// ---------------- Bot ready ----------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
 
-  // Load posted versions
   loadPostedVersions();
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-  // Clear all existing global commands
   try {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log('Cleared all existing global commands.');
-  } catch (err) {
-    console.error('Failed to clear commands:', err);
-  }
+    // Clear existing global commands safely
+    const existingCommands = await rest.get(Routes.applicationCommands(CLIENT_ID));
+    if (existingCommands?.length) {
+      console.log(`Clearing ${existingCommands.length} old global commands...`);
+      for (const cmd of existingCommands) {
+        await rest.delete(Routes.applicationCommand(CLIENT_ID, cmd.id));
+      }
+    }
 
-  // Register new slash commands
-  try {
+    // Register new commands
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log('Slash commands registered!');
   } catch (err) {
-    console.error('Error registering slash commands:', err);
+    console.error('Error clearing/registering commands:', err);
   }
 
-  // Start Modrinth polling
+  // Start Modrinth polling (normal mode respects posted_versions.json)
   checkForModUpdates();
-  setInterval(checkForModUpdates, POLL_INTERVAL_MS);
+  setInterval(() => checkForModUpdates(), POLL_INTERVAL_MS);
 });
 
-// ---------------- Slash command handling ----------------
+// ---------------- Interaction handler ----------------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -216,8 +253,17 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply('Here is the Modrinth mod link: https://modrinth.com/project/qWl7Ylv2');
     }
   } else if (interaction.commandName === 'modrinthtest') {
-    await interaction.reply('Fetching all current Modrinth versions...');
-    await checkForModUpdates(interaction.channel);
+    // Reply immediately to acknowledge command, then send newest TEST_LATEST_COUNT versions bypassing the JSON.
+    await interaction.reply(`Fetching newest ${TEST_LATEST_COUNT} Modrinth versions (bypassing saved state)...`);
+
+    try {
+      // send into the channel the command was used in, bypassing posted_versions.json (ignorePosted = true)
+      await checkForModUpdates(interaction.channel, true, TEST_LATEST_COUNT);
+      await interaction.followUp('Done — shown newest versions (not saved).');
+    } catch (err) {
+      console.error("Error during modrinthtest:", err);
+      await interaction.followUp('Failed to fetch/send Modrinth updates.');
+    }
   }
 });
 
