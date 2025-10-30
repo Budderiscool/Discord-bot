@@ -6,12 +6,12 @@ const path = require('path');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const CLIENT_ID = process.env.CLIENT_ID; // Your bot's application/client ID
+const CLIENT_ID = process.env.CLIENT_ID;
 
 // Modrinth settings
 const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
-const UPDATE_CHANNEL_ID = '1431127498904703078'; // Discord channel ID to post updates
-const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const UPDATE_CHANNEL_ID = '1431127498904703078';
+const POLL_INTERVAL_MS = 10 * 60 * 1000;
 const DATA_FILE = path.join(__dirname, 'posted_versions.json');
 
 const client = new Client({
@@ -83,13 +83,15 @@ const commands = [
         { name: 'modrinth', value: 'modrinth' },
         { name: 'curseforge', value: 'curseforge' }
       )
-    )
+    ),
+  new SlashCommandBuilder()
+    .setName('modrinthtest')
+    .setDescription('Test command to send all current Modrinth updates')
 ].map(cmd => cmd.toJSON());
 
 // ---------------- Modrinth updater ----------------
 let postedVersions = new Set();
 
-// Load posted versions from file
 function loadPostedVersions() {
   if (fs.existsSync(DATA_FILE)) {
     try {
@@ -101,7 +103,6 @@ function loadPostedVersions() {
   }
 }
 
-// Save posted versions to file
 function savePostedVersions() {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify([...postedVersions]), 'utf-8');
@@ -121,12 +122,14 @@ async function fetchModrinthVersions() {
   }
 }
 
-async function checkForModUpdates() {
+async function checkForModUpdates(channel = null) {
   const versions = await fetchModrinthVersions();
   if (!versions || !versions.length) return;
 
-  const channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
-  if (!channel) return;
+  if (!channel) {
+    channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+  }
 
   for (const version of versions) {
     if (postedVersions.has(version.id)) continue;
@@ -158,13 +161,19 @@ client.once('ready', async () => {
   // Load posted versions
   loadPostedVersions();
 
-  // Register slash commands globally
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+  // Clear all existing global commands
   try {
-    await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: commands }
-    );
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+    console.log('Cleared all existing global commands.');
+  } catch (err) {
+    console.error('Failed to clear commands:', err);
+  }
+
+  // Register new slash commands
+  try {
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log('Slash commands registered!');
   } catch (err) {
     console.error('Error registering slash commands:', err);
@@ -175,9 +184,10 @@ client.once('ready', async () => {
   setInterval(checkForModUpdates, POLL_INTERVAL_MS);
 });
 
-// Handle slash commands
+// ---------------- Slash command handling ----------------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
   if (interaction.commandName === 'ping') {
     await interaction.reply(`🏓 Pong! Latency is ${client.ws.ping}ms.`);
   } else if (interaction.commandName === 'server') {
@@ -191,10 +201,13 @@ client.on('interactionCreate', async (interaction) => {
     } else {
       await interaction.reply('Here is the Modrinth mod link: https://modrinth.com/project/qWl7Ylv2');
     }
+  } else if (interaction.commandName === 'modrinthtest') {
+    await interaction.reply('Fetching all current Modrinth versions...');
+    await checkForModUpdates(interaction.channel);
   }
 });
 
-// Message moderation & spam
+// ---------------- Message moderation & spam ----------------
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
