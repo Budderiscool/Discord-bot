@@ -1,308 +1,211 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const CLIENT_ID = process.env.CLIENT_ID;
-
-// Modrinth settings
-const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
 const UPDATE_CHANNEL_ID = '1431127498904703078';
-const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const DATA_FILE = path.join(__dirname, 'posted_versions.json');
+const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
+const SETTINGS_FILE = path.join(__dirname, 'modrinth_settings.json');
 
-// How many latest versions /modrinthtest should send
-const TEST_LATEST_COUNT = 5;
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
-  ]
-});
+// ---------------- Settings ----------------
+let settings = {
+  modrinth: {
+    color: 0x00ff00,
+    showThumbnail: true,
+    showBanner: true,
+    maxChangelogLength: 1024
+  },
+  general: {
+    botSeesMessages: true
+  }
+};
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-// ---------------- Spam / moderation ----------------
-const SPAM_INTERVAL_MS = 10 * 1000;
-const SPAM_MESSAGE_COUNT = 5;
-const BASE_MUTE_MINUTES = 5;
-const MUTE_MULTIPLIER = 2;
-
-const userSpamMap = new Map();
-const userMuteStrikes = new Map();
-
-async function isMessageBad(messageContent) {
-  const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-  const prompt = `Is this Discord message inappropriate, toxic, offensive, or spam? Reply "yes" for delete, "no" for keep:\n\n"${messageContent}"`;
-  try {
-    const result = await model.generateContent(prompt);
-    const answer = result.response.text().trim().toLowerCase();
-    return answer.startsWith("yes");
-  } catch (err) {
-    console.error("Gemini API error:", err);
-    return false;
+function loadSettings() {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')); }
+    catch(err){ console.error("Failed to load settings:", err); }
   }
 }
 
-async function muteUser(member, strikes) {
-  let minutes = BASE_MUTE_MINUTES * Math.pow(MUTE_MULTIPLIER, strikes - 1);
-  let ms = minutes * 60 * 1000;
-  try {
-    await member.timeout(ms, `Muted for spam (strike ${strikes})`);
-    return minutes;
-  } catch (err) {
-    console.error(`Failed to mute user ${member.id}:`, err);
-    return null;
-  }
+function saveSettings() {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
-async function sendDM(user, reason, duration) {
-  try {
-    await user.send(`You have been muted on ${user.guild?.name || "the server"} for ${duration} minutes. Reason: ${reason}\n\nPlease avoid spamming or posting inappropriate messages. Repeat violations will result in longer mutes.`);
-  } catch (err) {
-    console.error(`Could not DM user ${user.id}:`, err);
-  }
-}
-
-// ---------------- Slash commands ----------------
+// ---------------- Commands ----------------
 const commands = [
-  new SlashCommandBuilder().setName('ping').setDescription('Replies with bot latency'),
-  new SlashCommandBuilder().setName('server').setDescription('Replies with server info'),
-  new SlashCommandBuilder().setName('user').setDescription('Replies with your user info'),
-  new SlashCommandBuilder()
-    .setName('modlink')
-    .setDescription('Get a mod link (Modrinth or CurseForge)')
-    .addStringOption(option => option
-      .setName('site')
-      .setDescription('Site to get the mod link from')
-      .setRequired(false)
-      .addChoices(
-        { name: 'modrinth', value: 'modrinth' },
-        { name: 'curseforge', value: 'curseforge' }
-      )
-    ),
-  new SlashCommandBuilder()
-    .setName('modrinthtest')
-    .setDescription('Test command to send the newest Modrinth updates (bypasses stored JSON)')
+  new SlashCommandBuilder().setName('settings').setDescription('Open interactive settings dashboard')
 ].map(cmd => cmd.toJSON());
 
-// ---------------- Modrinth updater ----------------
-let postedVersions = new Set();
-
-function loadPostedVersions() {
-  if (fs.existsSync(DATA_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-      postedVersions = new Set(data);
-    } catch (err) {
-      console.error("Failed to load posted versions:", err);
-    }
-  }
-}
-
-function savePostedVersions() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify([...postedVersions]), 'utf-8');
-  } catch (err) {
-    console.error("Failed to save posted versions:", err);
-  }
-}
-
-async function fetchModrinthVersions() {
-  try {
-    const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.error("Failed to fetch Modrinth versions:", err);
-    return [];
-  }
-}
-
-async function fetchModrinthProject() {
+// ---------------- Modrinth Fetch Helpers ----------------
+async function fetchProject() {
   try {
     const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.error("Failed to fetch Modrinth project:", err);
+    return res.json();
+  } catch(err) {
+    console.error("Failed to fetch project:", err);
     return {};
   }
 }
 
-/**
- * checkForModUpdates
- * @param {Object|null} channel - discord.js channel object to post into (if null, uses UPDATE_CHANNEL_ID)
- * @param {boolean} ignorePosted - if true, bypass postedVersions checks and DO NOT save posted IDs (used by test)
- * @param {number|null} limit - if provided, only send up to `limit` versions (latest first)
- */
-async function checkForModUpdates(channel = null, ignorePosted = false, limit = null) {
-  const versions = await fetchModrinthVersions();
-  if (!versions || !versions.length) return;
-
-  // sort newest-first by date_published
-  versions.sort((a, b) => new Date(b.date_published) - new Date(a.date_published));
-
-  const projectData = await fetchModrinthProject();
-  const projectName = projectData.title || "Modrinth Project";
-  const projectAuthor = projectData.author?.username || "Unknown Creator";
-  const projectIcon = projectData.icon_url || null;
-  const projectBanner = projectData.gallery?.[0] || null; // attempt to use first gallery image as big image
-
-  if (!channel) {
-    channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
-    if (!channel) return;
-  }
-
-  // apply limit if provided
-  const toSend = limit ? versions.slice(0, limit) : versions;
-
-  for (const version of toSend) {
-    if (!ignorePosted && postedVersions.has(version.id)) continue;
-
-    const versionName = version.name || version.version_number || "Unnamed";
-    const versionType = version.version_type || "Unknown";
-    const changelog = version.changelog || "No changelog provided";
-    const url = `https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`;
-
-    // compose downloads list safely (limit text so embed stays under limits)
-    const downloads = (version.files || [])
-      .map(f => f.filename ? `[${f.filename}](${f.url})` : (f.url || 'No URL'))
-      .join('\n') || "No files";
-
-    const embed = {
-      color: 0x00ff00,
-      title: `${projectName} — ${versionName}`,
-      url: url,
-      description: changelog.length > 1024 ? changelog.substring(0, 1021) + "..." : changelog,
-      thumbnail: projectIcon ? { url: projectIcon } : undefined,
-      image: projectBanner ? { url: projectBanner } : undefined,
-      fields: [
-        { name: "Version", value: versionName, inline: true },
-        { name: "Author", value: projectAuthor, inline: true },
-        { name: "Type", value: versionType, inline: true },
-        { name: "Downloads", value: downloads.length > 1024 ? "Too many files to list." : downloads }
-      ],
-      timestamp: new Date(version.date_published).toISOString(),
-      footer: { text: "Modrinth Updates" }
-    };
-
-    try {
-      await channel.send({ embeds: [embed] });
-      // Only mark as posted if NOT in test/bypass mode
-      if (!ignorePosted) {
-        postedVersions.add(version.id);
-        savePostedVersions();
-      }
-    } catch (err) {
-      console.error("Failed to send Modrinth embed:", err);
-    }
+async function fetchLatestVersion() {
+  try {
+    const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    data.sort((a,b)=>new Date(b.date_published)-new Date(a.date_published));
+    return data[0];
+  } catch(err) {
+    console.error("Failed to fetch version:", err);
+    return null;
   }
 }
 
-// ---------------- Bot ready ----------------
-client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}!`);
+// ---------------- Embed Builder ----------------
+async function buildModrinthPreviewEmbed() {
+  const project = await fetchProject();
+  const version = await fetchLatestVersion();
+  if (!project || !version) return new EmbedBuilder().setTitle('Modrinth Preview Error');
 
-  loadPostedVersions();
+  const embed = new EmbedBuilder()
+    .setColor(settings.modrinth.color)
+    .setTitle(`${project.title || "Modrinth Project"} — ${version.name || version.version_number}`)
+    .setURL(`https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`)
+    .setDescription(version.changelog?.length > settings.modrinth.maxChangelogLength
+      ? version.changelog.substring(0, settings.modrinth.maxChangelogLength-3) + '...'
+      : version.changelog || 'No changelog provided')
+    .setTimestamp(new Date(version.date_published))
+    .setFooter({ text: "Modrinth Live Preview" });
 
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  if (settings.modrinth.showThumbnail && project.icon_url) embed.setThumbnail(project.icon_url);
+  if (settings.modrinth.showBanner && project.gallery?.[0]) embed.setImage(project.gallery[0]);
+
+  embed.addFields(
+    { name: "Author", value: project.author?.username || "Unknown", inline: true },
+    { name: "Type", value: version.version_type || "Unknown", inline: true },
+    { name: "Downloads", value: version.files?.map(f=>`[${f.filename}](${f.url})`).join('\n') || "No files" }
+  );
+
+  return embed;
+}
+
+// ---------------- Buttons/Components ----------------
+function getDashboardComponents(activeTab='modrinth') {
+  const tabRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tab_modrinth').setLabel('Modrinth').setStyle(activeTab==='modrinth'?ButtonStyle.Primary:ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('tab_general').setLabel('General').setStyle(activeTab==='general'?ButtonStyle.Primary:ButtonStyle.Secondary)
+  );
+
+  const modrinthRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('toggle_banner').setLabel(`Banner: ${settings.modrinth.showBanner?'ON':'OFF'}`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('toggle_thumbnail').setLabel(`Thumbnail: ${settings.modrinth.showThumbnail?'ON':'OFF'}`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('change_color').setLabel('Change Color').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('change_changelog').setLabel('Max Changelog Length').setStyle(ButtonStyle.Primary)
+  );
+
+  const generalRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('toggle_botSee').setLabel(`Bot Sees Messages: ${settings.general.botSeesMessages?'ON':'OFF'}`).setStyle(ButtonStyle.Success)
+  );
+
+  return activeTab==='modrinth' ? [tabRow, modrinthRow] : [tabRow, generalRow];
+}
+
+// ---------------- Ready ----------------
+client.once('ready', async ()=>{
+  console.log(`Logged in as ${client.user.tag}`);
+
+  loadSettings();
+
+  const rest = new REST({ version:'10' }).setToken(DISCORD_TOKEN);
 
   try {
-    // Clear existing global commands safely
-    const existingCommands = await rest.get(Routes.applicationCommands(CLIENT_ID));
-    if (existingCommands?.length) {
-      console.log(`Clearing ${existingCommands.length} old global commands...`);
-      for (const cmd of existingCommands) {
-        await rest.delete(Routes.applicationCommand(CLIENT_ID, cmd.id));
-      }
-    }
-
-    // Register new commands
+    // Remove old commands
+    const existing = await rest.get(Routes.applicationCommands(CLIENT_ID));
+    if(existing?.length) for(const cmd of existing) await rest.delete(Routes.applicationCommand(CLIENT_ID, cmd.id));
+    // Register new command
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log('Slash commands registered!');
-  } catch (err) {
-    console.error('Error clearing/registering commands:', err);
-  }
-
-  // Start Modrinth polling (normal mode respects posted_versions.json)
-  checkForModUpdates();
-  setInterval(() => checkForModUpdates(), POLL_INTERVAL_MS);
+  } catch(err){ console.error(err); }
 });
 
-// ---------------- Interaction handler ----------------
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === 'ping') {
-    await interaction.reply(`🏓 Pong! Latency is ${client.ws.ping}ms.`);
-  } else if (interaction.commandName === 'server') {
-    await interaction.reply(`Server name: ${interaction.guild.name}\nTotal members: ${interaction.guild.memberCount}`);
-  } else if (interaction.commandName === 'user') {
-    await interaction.reply(`Your tag: ${interaction.user.tag}\nYour ID: ${interaction.user.id}`);
-  } else if (interaction.commandName === 'modlink') {
-    const site = interaction.options.getString('site') || 'modrinth';
-    if (site === 'curseforge') {
-      await interaction.reply('Here is the CurseForge mod link: curseforge');
-    } else {
-      await interaction.reply('Here is the Modrinth mod link: https://modrinth.com/project/qWl7Ylv2');
-    }
-  } else if (interaction.commandName === 'modrinthtest') {
-    // Reply immediately to acknowledge command, then send newest TEST_LATEST_COUNT versions bypassing the JSON.
-    await interaction.reply(`Fetching newest ${TEST_LATEST_COUNT} Modrinth versions (bypassing saved state)...`);
-
-    try {
-      // send into the channel the command was used in, bypassing posted_versions.json (ignorePosted = true)
-      await checkForModUpdates(interaction.channel, true, TEST_LATEST_COUNT);
-      await interaction.followUp('Done — shown newest versions (not saved).');
-    } catch (err) {
-      console.error("Error during modrinthtest:", err);
-      await interaction.followUp('Failed to fetch/send Modrinth updates.');
-    }
-  }
-});
-
-// ---------------- Message moderation & spam ----------------
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-
-  try {
-    const shouldDelete = await isMessageBad(message.content);
-    if (shouldDelete) {
-      await message.delete();
-      await message.channel.send({
-        content: `Message from <@${message.author.id}> was deleted for violating server guidelines.`
-      });
-    }
-  } catch (err) {
-    console.error("Error moderating message:", err);
+// ---------------- Interaction Handler ----------------
+client.on('interactionCreate', async interaction=>{
+  if(interaction.isChatInputCommand() && interaction.commandName==='settings'){
+    const embed = await buildModrinthPreviewEmbed();
+    await interaction.reply({ embeds:[embed], components:getDashboardComponents('modrinth'), fetchReply:true });
   }
 
-  if (!message.guild) return;
+  if(interaction.isButton()){
+    const message = interaction.message;
+    const user = interaction.user;
 
-  const now = Date.now();
-  const userId = message.author.id;
-  let timestamps = userSpamMap.get(userId) || [];
-  timestamps = timestamps.filter(ts => now - ts < SPAM_INTERVAL_MS);
-  timestamps.push(now);
-  userSpamMap.set(userId, timestamps);
-
-  if (timestamps.length > SPAM_MESSAGE_COUNT) {
-    const member = await message.guild.members.fetch(userId);
-    let strikes = (userMuteStrikes.get(userId) || 0) + 1;
-    userMuteStrikes.set(userId, strikes);
-
-    const duration = await muteUser(member, strikes);
-    if (duration !== null) {
-      await sendDM(message.author, "Spamming messages", duration);
-      await message.channel.send(`<@${userId}> was muted for spamming (${duration} minutes, strike ${strikes}).`);
+    if(!message || !user) return;
+    if(interaction.customId.startsWith('tab_')){
+      const tab = interaction.customId.replace('tab_','');
+      await interaction.update({ components:getDashboardComponents(tab) });
+      return;
     }
-    userSpamMap.set(userId, []);
+
+    // ---- Modrinth Buttons ----
+    if(interaction.customId==='toggle_banner'){
+      settings.modrinth.showBanner = !settings.modrinth.showBanner;
+      saveSettings();
+      const embed = await buildModrinthPreviewEmbed();
+      await interaction.update({ embeds:[embed], components:getDashboardComponents('modrinth') });
+    }
+    if(interaction.customId==='toggle_thumbnail'){
+      settings.modrinth.showThumbnail = !settings.modrinth.showThumbnail;
+      saveSettings();
+      const embed = await buildModrinthPreviewEmbed();
+      await interaction.update({ embeds:[embed], components:getDashboardComponents('modrinth') });
+    }
+    if(interaction.customId==='change_color'){
+      const modal = new ModalBuilder()
+        .setCustomId('modal_color')
+        .setTitle('Enter Hex Color (e.g., 00ff00)')
+        .addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('color_input').setLabel('Hex Color').setStyle(TextInputStyle.Short).setPlaceholder('00ff00').setRequired(true)
+        ));
+      await interaction.showModal(modal);
+    }
+    if(interaction.customId==='change_changelog'){
+      const modal = new ModalBuilder()
+        .setCustomId('modal_changelog')
+        .setTitle('Max Changelog Length')
+        .addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('changelog_input').setLabel('Length (number)').setStyle(TextInputStyle.Short).setPlaceholder('1024').setRequired(true)
+        ));
+      await interaction.showModal(modal);
+    }
+
+    // ---- General Buttons ----
+    if(interaction.customId==='toggle_botSee'){
+      settings.general.botSeesMessages = !settings.general.botSeesMessages;
+      saveSettings();
+      await interaction.update({ components:getDashboardComponents('general') });
+    }
+  }
+
+  // ---- Modal Submit ----
+  if(interaction.isModalSubmit()){
+    if(interaction.customId==='modal_color'){
+      const hex = interaction.fields.getTextInputValue('color_input');
+      const parsed = parseInt(hex,16);
+      if(!isNaN(parsed)) settings.modrinth.color = parsed;
+      saveSettings();
+      const embed = await buildModrinthPreviewEmbed();
+      await interaction.update({ embeds:[embed], components:getDashboardComponents('modrinth') });
+    }
+    if(interaction.customId==='modal_changelog'){
+      const val = parseInt(interaction.fields.getTextInputValue('changelog_input'));
+      if(!isNaN(val)) settings.modrinth.maxChangelogLength = val;
+      saveSettings();
+      const embed = await buildModrinthPreviewEmbed();
+      await interaction.update({ embeds:[embed], components:getDashboardComponents('modrinth') });
+    }
   }
 });
 
