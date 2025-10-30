@@ -1,6 +1,5 @@
 const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const fetch = require('node-fetch'); // npm i node-fetch@2
 const fs = require('fs');
 const path = require('path');
 
