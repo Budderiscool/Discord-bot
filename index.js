@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -9,10 +9,11 @@ const UPDATE_CHANNEL_ID = '1431127498904703078';
 const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
 
 const DATA_FILE = path.join(__dirname, 'posted_versions.json');
+const SETTINGS_FILE = path.join(__dirname, 'modrinth_settings.json');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
-// ---------------- Posted versions ----------------
+// ---------------- Posted Versions ----------------
 let postedVersions = new Set();
 function loadPostedVersions() {
   if (fs.existsSync(DATA_FILE)) {
@@ -28,13 +29,36 @@ function savePostedVersions() {
   fs.writeFileSync(DATA_FILE, JSON.stringify([...postedVersions]), 'utf-8');
 }
 
+// ---------------- Settings ----------------
+let modSettings = { color: 0x00ff00 };
+function loadSettings() {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try {
+      modSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    } catch (err) {
+      console.error("Failed to load settings:", err);
+    }
+  }
+}
+
+function saveSettings() {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(modSettings), 'utf-8');
+}
+
 // ---------------- Commands ----------------
 const commands = [
-  new SlashCommandBuilder().setName('modlink').setDescription('Get a Modrinth mod link'),
-  new SlashCommandBuilder().setName('modrinthtest').setDescription('Send newest Modrinth versions (bypass JSON)')
+  new SlashCommandBuilder()
+    .setName('settings')
+    .setDescription('Edit the Modrinth embed settings (color, etc.)'),
+  new SlashCommandBuilder()
+    .setName('modlink')
+    .setDescription('Get a Modrinth mod link'),
+  new SlashCommandBuilder()
+    .setName('modrinthtest')
+    .setDescription('Send newest Modrinth versions (bypass JSON)')
 ].map(cmd => cmd.toJSON());
 
-// ---------------- Modrinth ----------------
+// ---------------- Modrinth Fetch ----------------
 async function fetchVersions() {
   const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
   if (!res.ok) return [];
@@ -51,7 +75,7 @@ async function sendModrinthEmbed(channel, version, project, ignorePosted = false
   if (!ignorePosted && postedVersions.has(version.id)) return;
 
   const embed = new EmbedBuilder()
-    .setColor(0x00ff00)
+    .setColor(modSettings.color)
     .setTitle(`${project.title || 'Modrinth Project'} — ${version.name || version.version_number}`)
     .setURL(`https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`)
     .setDescription(version.changelog || 'No changelog provided')
@@ -74,7 +98,6 @@ async function sendModrinthEmbed(channel, version, project, ignorePosted = false
   }
 }
 
-// ---------------- Check for updates ----------------
 async function checkForUpdates(channel = null, ignorePosted = false, limit = null) {
   const versions = await fetchVersions();
   if (!versions?.length) return;
@@ -92,38 +115,57 @@ async function checkForUpdates(channel = null, ignorePosted = false, limit = nul
 // ---------------- Ready ----------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
-
   loadPostedVersions();
-
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  loadSettings();
 
   try {
-    // Delete old guild commands
-    const existing = await rest.get(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID));
-    if (existing?.length) {
-      for (const cmd of existing) await rest.delete(Routes.applicationGuildCommand(CLIENT_ID, GUILD_ID, cmd.id));
-      console.log(`Deleted ${existing.length} old guild commands.`);
-    }
-
-    // Register new guild commands
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log('Guild slash commands registered!');
+    // Sync commands to the guild (deletes old commands automatically)
+    await client.application.commands.set(commands, GUILD_ID);
+    console.log('Commands synced! /settings is now available.');
   } catch (err) {
-    console.error('Error registering commands:', err);
+    console.error('Failed to sync commands:', err);
   }
 
   // Check for updates immediately
   checkForUpdates();
 });
 
-// ---------------- Interaction handler ----------------
+// ---------------- Interaction Handler ----------------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  // ---------------- Settings Command ----------------
+  if (interaction.commandName === 'settings') {
+    const modalColor = await interaction.reply({
+      content: 'Current embed color (hex) is: ' + modSettings.color.toString(16) + '\nReply with a new hex color (e.g., 0x00ff00) to update:',
+      fetchReply: true,
+      ephemeral: true
+    });
+
+    const filter = m => m.author.id === interaction.user.id;
+    const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 30000 });
+
+    collector.on('collect', m => {
+      const color = parseInt(m.content.replace(/^0x/, ''), 16);
+      if (!isNaN(color)) {
+        modSettings.color = color;
+        saveSettings();
+        interaction.followUp({ content: `Embed color updated to: 0x${color.toString(16)}`, ephemeral: true });
+      } else {
+        interaction.followUp({ content: 'Invalid color input.', ephemeral: true });
+      }
+      m.delete().catch(() => {});
+    });
+
+    return;
+  }
+
+  // ---------------- Modlink Command ----------------
   if (interaction.commandName === 'modlink') {
     await interaction.reply(`Here is the Modrinth mod link: https://modrinth.com/project/${MODRINTH_PROJECT_ID}`);
   }
 
+  // ---------------- Modrinth Test Command ----------------
   if (interaction.commandName === 'modrinthtest') {
     await interaction.reply('Sending newest Modrinth versions (bypassing saved state)...');
     await checkForUpdates(interaction.channel, true, 5);
