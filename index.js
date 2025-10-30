@@ -1,176 +1,195 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Colors,
+} = require('discord.js');
+const fetch = require('node-fetch');
+const express = require('express');
 const fs = require('fs');
-const path = require('path');
 
+// ====== CONFIG ======
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = '1417014862273445900';
-const UPDATE_CHANNEL_ID = '1431127498904703078';
-const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
+const GUILD_ID = "1417014862273445900";
+const MODRINTH_PROJECT_ID = "qWl7Ylv2";
+const SETTINGS_FILE = "./settings.json";
 
-const DATA_FILE = path.join(__dirname, 'posted_versions.json');
-const SETTINGS_FILE = path.join(__dirname, 'modrinth_settings.json');
-
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
-
-// ---------------- Posted Versions ----------------
-let postedVersions = new Set();
-function loadPostedVersions() {
-  if (fs.existsSync(DATA_FILE)) {
-    try {
-      postedVersions = new Set(JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')));
-    } catch (err) {
-      console.error("Failed to load posted versions:", err);
-    }
-  }
-}
-
-function savePostedVersions() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify([...postedVersions]), 'utf-8');
-}
-
-// ---------------- Settings ----------------
-let modSettings = { color: 0x00ff00 };
+// ====== SETTINGS STORAGE ======
 function loadSettings() {
-  if (fs.existsSync(SETTINGS_FILE)) {
-    try {
-      modSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
-    } catch (err) {
-      console.error("Failed to load settings:", err);
-    }
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+  } catch {
+    return { color: "#00ff88", showCreator: true, showIcon: true };
   }
 }
 
-function saveSettings() {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(modSettings), 'utf-8');
+function saveSettings(settings) {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
-// ---------------- Commands ----------------
+// ====== CLIENT INIT ======
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+});
+
+// ====== SLASH COMMANDS ======
 const commands = [
   new SlashCommandBuilder()
-    .setName('settings')
-    .setDescription('Edit the Modrinth embed settings (color, etc.)'),
+    .setName("modrinth-test")
+    .setDescription("Fetch and preview the latest Modrinth project data."),
   new SlashCommandBuilder()
-    .setName('modlink')
-    .setDescription('Get a Modrinth mod link'),
-  new SlashCommandBuilder()
-    .setName('modrinthtest')
-    .setDescription('Send newest Modrinth versions (bypass JSON)')
-].map(cmd => cmd.toJSON());
+    .setName("settings")
+    .setDescription("Configure bot display settings for Modrinth embeds."),
+];
 
-// ---------------- Modrinth Fetch ----------------
-async function fetchVersions() {
-  const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
-  if (!res.ok) return [];
-  return res.json();
-}
-
-async function fetchProject() {
-  const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
-  if (!res.ok) return {};
-  return res.json();
-}
-
-async function sendModrinthEmbed(channel, version, project, ignorePosted = false) {
-  if (!ignorePosted && postedVersions.has(version.id)) return;
-
-  const embed = new EmbedBuilder()
-    .setColor(modSettings.color)
-    .setTitle(`${project.title || 'Modrinth Project'} — ${version.name || version.version_number}`)
-    .setURL(`https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`)
-    .setDescription(version.changelog || 'No changelog provided')
-    .addFields(
-      { name: "Version", value: version.name || version.version_number || 'Unknown', inline: true },
-      { name: "Author", value: project.author?.username || 'Unknown', inline: true },
-      { name: "Type", value: version.version_type || 'Unknown', inline: true },
-      { name: "Downloads", value: version.files?.map(f => `[${f.filename}](${f.url})`).join('\n') || 'No files' }
-    )
-    .setTimestamp(new Date(version.date_published))
-    .setFooter({ text: "Modrinth Updates" });
-
-  if (project.icon_url) embed.setThumbnail(project.icon_url);
-  if (project.gallery?.[0]) embed.setImage(project.gallery[0]);
-
-  await channel.send({ embeds: [embed] });
-  if (!ignorePosted) {
-    postedVersions.add(version.id);
-    savePostedVersions();
-  }
-}
-
-async function checkForUpdates(channel = null, ignorePosted = false, limit = null) {
-  const versions = await fetchVersions();
-  if (!versions?.length) return;
-
-  versions.sort((a, b) => new Date(b.date_published) - new Date(a.date_published));
-  const project = await fetchProject();
-
-  if (!channel) channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
-  if (!channel) return;
-
-  const toSend = limit ? versions.slice(0, limit) : versions;
-  for (const version of toSend) await sendModrinthEmbed(channel, version, project, ignorePosted);
-}
-
-// ---------------- Ready ----------------
-client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}!`);
-  loadPostedVersions();
-  loadSettings();
-
+// ====== SYNC COMMANDS ======
+async function syncCommands() {
+  const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
   try {
-    // Sync commands to the guild (deletes old commands automatically)
-    await client.application.commands.set(commands, GUILD_ID);
-    console.log('Commands synced! /settings is now available.');
+    console.log("🔄 Clearing all previous slash commands...");
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
+    console.log("✅ Old commands cleared.");
+    console.log("🚀 Registering new commands...");
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log("✅ Commands registered!");
   } catch (err) {
-    console.error('Failed to sync commands:', err);
+    console.error("❌ Error syncing commands:", err);
   }
+}
 
-  // Check for updates immediately
-  checkForUpdates();
+// ====== MODRINTH FETCH ======
+async function fetchModrinthProject() {
+  const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}`);
+  if (!res.ok) throw new Error("Failed to fetch Modrinth project.");
+  return await res.json();
+}
+
+async function fetchModrinthVersions() {
+  const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
+  if (!res.ok) throw new Error("Failed to fetch Modrinth versions.");
+  return await res.json();
+}
+
+// ====== EMBED BUILDER ======
+function buildModrinthEmbed(project, versions, settings) {
+  const latest = versions[0];
+  const embed = new EmbedBuilder()
+    .setTitle(project.title)
+    .setURL(`https://modrinth.com/project/${project.slug}`)
+    .setDescription(latest.changelog?.slice(0, 1024) || "No changelog provided.")
+    .setColor(settings.color || "#00ff88")
+    .addFields(
+      { name: "Version", value: latest.name || "Unknown", inline: true },
+      { name: "Downloads", value: project.downloads.toString(), inline: true },
+      { name: "Followers", value: project.followers.toString(), inline: true }
+    )
+    .setTimestamp(new Date(latest.date_published));
+
+  if (settings.showIcon && project.icon_url) embed.setThumbnail(project.icon_url);
+  if (settings.showCreator && project.author) embed.setFooter({ text: `By ${project.author}` });
+
+  return embed;
+}
+
+// ====== INTERACTION HANDLERS ======
+client.once("ready", async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  await syncCommands();
 });
 
-// ---------------- Interaction Handler ----------------
-client.on('interactionCreate', async interaction => {
+// ====== COMMAND LOGIC ======
+client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  const settings = loadSettings();
 
-  // ---------------- Settings Command ----------------
-  if (interaction.commandName === 'settings') {
-    const modalColor = await interaction.reply({
-      content: 'Current embed color (hex) is: ' + modSettings.color.toString(16) + '\nReply with a new hex color (e.g., 0x00ff00) to update:',
-      fetchReply: true,
-      ephemeral: true
-    });
-
-    const filter = m => m.author.id === interaction.user.id;
-    const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 30000 });
-
-    collector.on('collect', m => {
-      const color = parseInt(m.content.replace(/^0x/, ''), 16);
-      if (!isNaN(color)) {
-        modSettings.color = color;
-        saveSettings();
-        interaction.followUp({ content: `Embed color updated to: 0x${color.toString(16)}`, ephemeral: true });
-      } else {
-        interaction.followUp({ content: 'Invalid color input.', ephemeral: true });
-      }
-      m.delete().catch(() => {});
-    });
-
-    return;
+  if (interaction.commandName === "modrinth-test") {
+    await interaction.reply("⏳ Fetching latest Modrinth project data...");
+    try {
+      const project = await fetchModrinthProject();
+      const versions = await fetchModrinthVersions();
+      const embed = buildModrinthEmbed(project, versions, settings);
+      await interaction.editReply({ content: "", embeds: [embed] });
+    } catch (err) {
+      console.error(err);
+      await interaction.editReply("❌ Failed to fetch Modrinth data.");
+    }
   }
 
-  // ---------------- Modlink Command ----------------
-  if (interaction.commandName === 'modlink') {
-    await interaction.reply(`Here is the Modrinth mod link: https://modrinth.com/project/${MODRINTH_PROJECT_ID}`);
-  }
+  if (interaction.commandName === "settings") {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("toggle_icon")
+        .setLabel(settings.showIcon ? "🟢 Hide Icon" : "⚪ Show Icon")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId("toggle_creator")
+        .setLabel(settings.showCreator ? "🟢 Hide Creator" : "⚪ Show Creator")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId("change_color")
+        .setLabel("🎨 Change Color")
+        .setStyle(ButtonStyle.Primary)
+    );
 
-  // ---------------- Modrinth Test Command ----------------
-  if (interaction.commandName === 'modrinthtest') {
-    await interaction.reply('Sending newest Modrinth versions (bypassing saved state)...');
-    await checkForUpdates(interaction.channel, true, 5);
-    await interaction.followUp('Done!');
+    const preview = new EmbedBuilder()
+      .setTitle("Settings Panel")
+      .setDescription(
+        `Adjust how Modrinth embeds are displayed.\n\n**Current Settings:**\nColor: ${settings.color}\nShow Icon: ${settings.showIcon}\nShow Creator: ${settings.showCreator}`
+      )
+      .setColor(settings.color);
+
+    await interaction.reply({
+      embeds: [preview],
+      components: [row],
+      ephemeral: true,
+    });
   }
 });
 
+// ====== BUTTON HANDLING ======
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+  const settings = loadSettings();
+
+  if (interaction.customId === "toggle_icon") {
+    settings.showIcon = !settings.showIcon;
+  } else if (interaction.customId === "toggle_creator") {
+    settings.showCreator = !settings.showCreator;
+  } else if (interaction.customId === "change_color") {
+    const newColor =
+      settings.color === "#00ff88"
+        ? "#00bfff"
+        : settings.color === "#00bfff"
+        ? "#ff8800"
+        : "#00ff88";
+    settings.color = newColor;
+  }
+
+  saveSettings(settings);
+
+  const updatedEmbed = new EmbedBuilder()
+    .setTitle("✅ Settings Updated")
+    .setDescription(
+      `**Color:** ${settings.color}\n**Show Icon:** ${settings.showIcon}\n**Show Creator:** ${settings.showCreator}`
+    )
+    .setColor(settings.color);
+
+  await interaction.update({ embeds: [updatedEmbed] });
+});
+
+// ====== KEEP ALIVE (RENDER FIX) ======
+const app = express();
+app.get("/", (req, res) => res.send("Bot is running fine!"));
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🌐 Web server active — Render won't time out.");
+});
+
+// ====== START BOT ======
 client.login(DISCORD_TOKEN);
