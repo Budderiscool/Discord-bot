@@ -1,9 +1,18 @@
 const { Client, GatewayIntentBits, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fetch = require('node-fetch'); // npm i node-fetch@2
+const fs = require('fs');
+const path = require('path');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const CLIENT_ID = process.env.CLIENT_ID; // Your bot's application/client ID
+
+// Modrinth settings
+const MODRINTH_PROJECT_ID = 'qWl7Ylv2';
+const UPDATE_CHANNEL_ID = '1431127498904703078'; // Discord channel ID to post updates
+const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const DATA_FILE = path.join(__dirname, 'posted_versions.json');
 
 const client = new Client({
   intents: [
@@ -16,7 +25,7 @@ const client = new Client({
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// Spam detection config
+// ---------------- Spam / moderation ----------------
 const SPAM_INTERVAL_MS = 10 * 1000;
 const SPAM_MESSAGE_COUNT = 5;
 const BASE_MUTE_MINUTES = 5;
@@ -58,7 +67,7 @@ async function sendDM(user, reason, duration) {
   }
 }
 
-// SLASH COMMANDS
+// ---------------- Slash commands ----------------
 const commands = [
   new SlashCommandBuilder().setName('ping').setDescription('Replies with bot latency'),
   new SlashCommandBuilder().setName('server').setDescription('Replies with server info'),
@@ -77,8 +86,78 @@ const commands = [
     )
 ].map(cmd => cmd.toJSON());
 
+// ---------------- Modrinth updater ----------------
+let postedVersions = new Set();
+
+// Load posted versions from file
+function loadPostedVersions() {
+  if (fs.existsSync(DATA_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+      postedVersions = new Set(data);
+    } catch (err) {
+      console.error("Failed to load posted versions:", err);
+    }
+  }
+}
+
+// Save posted versions to file
+function savePostedVersions() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify([...postedVersions]), 'utf-8');
+  } catch (err) {
+    console.error("Failed to save posted versions:", err);
+  }
+}
+
+async function fetchModrinthVersions() {
+  try {
+    const res = await fetch(`https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error("Failed to fetch Modrinth versions:", err);
+    return [];
+  }
+}
+
+async function checkForModUpdates() {
+  const versions = await fetchModrinthVersions();
+  if (!versions || !versions.length) return;
+
+  const channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
+  if (!channel) return;
+
+  for (const version of versions) {
+    if (postedVersions.has(version.id)) continue;
+
+    const name = version.name || version.version_number;
+    const changelog = version.changelog || "No changelog provided";
+    const versionType = version.version_type;
+    const url = `https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`;
+
+    const embed = {
+      color: 0x00ff00,
+      title: `New ${versionType} version: ${name}`,
+      description: changelog.length > 1024 ? changelog.substring(0, 1021) + "..." : changelog,
+      url: url,
+      timestamp: new Date(version.date_published).toISOString(),
+      footer: { text: "Modrinth Updates" }
+    };
+
+    await channel.send({ embeds: [embed] });
+    postedVersions.add(version.id);
+    savePostedVersions();
+  }
+}
+
+// ---------------- Bot events ----------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
+
+  // Load posted versions
+  loadPostedVersions();
+
   // Register slash commands globally
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   try {
@@ -90,6 +169,10 @@ client.once('ready', async () => {
   } catch (err) {
     console.error('Error registering slash commands:', err);
   }
+
+  // Start Modrinth polling
+  checkForModUpdates();
+  setInterval(checkForModUpdates, POLL_INTERVAL_MS);
 });
 
 // Handle slash commands
@@ -111,11 +194,10 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// Message moderation & spam
 client.on('messageCreate', async (message) => {
-  // Ignore bots
   if (message.author.bot) return;
 
-  // AI Moderation
   try {
     const shouldDelete = await isMessageBad(message.content);
     if (shouldDelete) {
@@ -128,7 +210,6 @@ client.on('messageCreate', async (message) => {
     console.error("Error moderating message:", err);
   }
 
-  // Spam detection (guild messages only)
   if (!message.guild) return;
 
   const now = Date.now();
