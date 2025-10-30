@@ -1,7 +1,6 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
-const fetch = require('node-fetch');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -56,13 +55,13 @@ async function sendModrinthEmbed(channel, version, project, ignorePosted = false
     .setTitle(`${project.title || 'Modrinth Project'} — ${version.name || version.version_number}`)
     .setURL(`https://modrinth.com/project/${MODRINTH_PROJECT_ID}/version/${version.id}`)
     .setDescription(version.changelog || 'No changelog provided')
-    .setFields(
+    .addFields(
       { name: "Version", value: version.name || version.version_number || 'Unknown', inline: true },
       { name: "Author", value: project.author?.username || 'Unknown', inline: true },
       { name: "Type", value: version.version_type || 'Unknown', inline: true },
       { name: "Downloads", value: version.files?.map(f => `[${f.filename}](${f.url})`).join('\n') || 'No files' }
     )
-    .setTimestamp(new Date(version.date_published).toISOString())
+    .setTimestamp(new Date(version.date_published))
     .setFooter({ text: "Modrinth Updates" });
 
   if (project.icon_url) embed.setThumbnail(project.icon_url);
