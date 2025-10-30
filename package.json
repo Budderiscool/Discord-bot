@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
+  "scripts": {
+    "start": "node index.js",
+    "build": "echo \"no build step needed\""
+  },
   "dependencies": {
-    "discord.js": "^14.0.0",
-    "@google/generative-ai": "^0.3.0"
+    "discord.js": "^14.24.1",
+    "@google/generative-ai": "^0.3.1"
   }
 }
