@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "A Discord bot that checks for Modrinth updates and has adjustable embed settings.",
   "main": "index.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
