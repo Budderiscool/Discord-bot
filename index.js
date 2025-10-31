@@ -8,9 +8,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Colors,
 } = require('discord.js');
-const fetch = require('node-fetch');
 const express = require('express');
 const fs = require('fs');
 
@@ -139,9 +137,9 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     const preview = new EmbedBuilder()
-      .setTitle("Settings Panel")
+      .setTitle("⚙️ Settings Panel")
       .setDescription(
-        `Adjust how Modrinth embeds are displayed.\n\n**Current Settings:**\nColor: ${settings.color}\nShow Icon: ${settings.showIcon}\nShow Creator: ${settings.showCreator}`
+        `Adjust how Modrinth embeds look.\n\n**Current Settings:**\nColor: ${settings.color}\nShow Icon: ${settings.showIcon}\nShow Creator: ${settings.showCreator}`
       )
       .setColor(settings.color);
 
